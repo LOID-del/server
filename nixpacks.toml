@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ['python313', 'libjpeg', 'zlib', 'freetype', 'lcms2', 'openjpeg', 'libtiff', 'libwebp']
+nixPkgs = ['python312', 'libjpeg', 'zlib', 'freetype', 'lcms2', 'openjpeg', 'libtiff', 'libwebp']
 
 [phases.install]
 cmds = [
