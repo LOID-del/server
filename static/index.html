@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DermAware</title>
+    <link rel="preconnect" href="">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo">DA</div>
+        <div class="titles">
+          <h1>DermAware</h1>
+          <p>Skin health insights with AI</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="themeToggle" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
+          <span class="icon-sun" aria-hidden="true"></span>
+          <span class="icon-moon" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card hero">
+        <div class="hero-content">
+          <h2>Analyze your skin condition</h2>
+          <p>Upload a photo and choose analysis mode. Default theme is light; dark mode is available.</p>
+        </div>
+        <div class="hero-actions">
+          <div class="mode-switch">
+            <label>
+              <input type="radio" name="mode" value="online" checked>
+              <span>Online</span>
+            </label>
+            <label>
+              <input type="radio" name="mode" value="offline">
+              <span>Offline</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="card upload">
+        <div class="uploader" id="uploader">
+          <input type="file" id="fileInput" accept="image/*">
+          <div class="dropzone" id="dropzone">
+            <div class="preview" id="preview"></div>
+            <div class="drop-msg">
+              <div class="big-icon">📷</div>
+              <p>Drop an image here or click to select</p>
+            </div>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button id="analyzeBtn" class="primary-btn">Analyze Skin</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="card result">
+          <h3>Result</h3>
+          <div id="resultContent" class="result-content">
+            <p class="muted">No result yet. Upload an image and analyze.</p>
+          </div>
+        </div>
+        <div class="card tips">
+          <h3>Care Tips</h3>
+          <ul id="tipsList" class="list"></ul>
+        </div>
+      </section>
+    </main>
+
+    <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+      <div class="loader">
+        <div class="ring">
+          <div class="segment s1"></div>
+          <div class="segment s2"></div>
+          <div class="segment s3"></div>
+          <div class="segment s4"></div>
+        </div>
+        <div class="loader-text">Analyzing...</div>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      <div>© DermAware</div>
+      <div class="footer-links">
+        <a href="/">API Health</a>
+        <a href="/docs">API Docs</a>
+      </div>
+    </footer>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+  </html>
+

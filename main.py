@@ -5,20 +5,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from PIL import Image
 import numpy as np
+import tensorflow as tf
 import os
-from openai import OpenAI
+from groq import Groq
 from dotenv import load_dotenv
 import io
 import json
 import httpx
 import traceback
+import socket
 
 load_dotenv()
 
 # =========================
 # AI CHAT (OpenAI)
 # =========================
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # =========================
 # AILABTOOLS CONFIG
@@ -26,23 +28,17 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 AILABTOOLS_API_KEY = os.getenv("AILABTOOLS_API_KEY")
 
 # =========================
-# TFLite Model (OPTIONAL - only if files exist)
+# Load TFLite model (for OFFLINE mode)
 # =========================
-interpreter = None
-labels = []
+interpreter = tf.lite.Interpreter(model_path="model_unquant.tflite")
+interpreter.allocate_tensors()
 
-try:
-    import tensorflow as tf
-    if os.path.exists("model_unquant.tflite") and os.path.exists("labels.txt"):
-        interpreter = tf.lite.Interpreter(model_path="model_unquant.tflite")
-        interpreter.allocate_tensors()
-        with open("labels.txt") as f:
-            labels = [line.strip() for line in f.readlines()]
-        print("✅ TFLite model loaded")
-    else:
-        print("⚠️ TFLite files not found - offline mode disabled")
-except Exception as e:
-    print(f"⚠️ TFLite unavailable: {e}")
+input_details = interpreter.get_input_details()[0]
+output_details = interpreter.get_output_details()[0]
+
+# Load labels
+with open("labels.txt") as f:
+    labels = [line.strip() for line in f.readlines()]
 
 app = FastAPI(title="DermAware Backend")
 
@@ -54,13 +50,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files (optional)
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+# Static files (UI)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # =========================
 # Utils
 # =========================
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
 def preprocess_image(image: Image.Image):
     """Preprocess image for TFLite model"""
     image = image.resize((224, 224), Image.BILINEAR)
@@ -72,39 +77,50 @@ def normalize_label(label: str) -> str:
     """Normalize condition labels"""
     label = label.lower().strip()
     
+    # Handle various "healthy" variations
     if any(term in label for term in ["healthy", "normal", "clear"]):
         return "healthy"
     
+    # Handle "not skin" variations
     if any(term in label for term in ["not skin", "not_skin", "no skin", "invalid"]):
         return "not_skin"
     
     return label
 
 def is_low_confidence(confidence: float, threshold: float = 0.4) -> bool:
-    """Check if confidence is too low"""
+    """Check if confidence is too low (might be random object)"""
     return confidence < threshold
 
 def get_skin_info_from_openai(label: str):
-    """Get skin condition info from OpenAI"""
+    """
+    🆕 UPDATED: Get popular/common name and info from OpenAI
+    Returns: most popular English term + detailed info
+    """
     try:
-        print(f"🤖 Asking OpenAI for details about: {label}")
+        print(f"🤖 Asking Groq for details about: {label}")
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a dermatology assistant. "
+                        "IMPORTANT: Use the MOST POPULAR, COMMON English name that regular people use - NOT scientific/medical terms. "
+                        "For example: 'Ringworm' NOT 'Tinea Corporis', 'Athlete's Foot' NOT 'Tinea Pedis', "
+                        "'Cold Sore' NOT 'Herpes Simplex', 'Hives' NOT 'Urticaria', etc.\n\n"
                         "Provide info in JSON format:\n"
-                        "- alsoKnownAs: The most popular common name for this condition\n"
-                        "- explanation: 2-3 sentences definition in English\n"
-                        "- causes: 3-5 common causes in English\n"
-                        "- dos: 3-5 care recommendations in English\n"
-                        "- donts: 3-5 things to avoid in English\n"
-                        "Return ONLY valid JSON."
+                        "- alsoKnownAs: The MOST POPULAR common English name people actually use (NOT medical/scientific term)\n"
+                        "- explanation: 2-3 sentences simple definition in everyday English\n"
+                        "- causes: 3-5 common causes in simple language\n"
+                        "- dos: 3-5 care recommendations in simple, actionable language\n"
+                        "- donts: 3-5 things to avoid in simple language\n"
+                        "Return ONLY valid JSON. Use simple, everyday language throughout."
                     )
                 },
-                {"role": "user", "content": f"Explain this skin condition: {label}"}
+                {
+                    "role": "user", 
+                    "content": f"What is the most popular common name for '{label}' and explain this skin condition in simple terms."
+                }
             ],
             response_format={"type": "json_object"}
         )
@@ -133,16 +149,20 @@ def get_skin_info_from_openai(label: str):
 # =========================
 @app.post("/classify/online")
 async def classify_online(file: UploadFile = File(...)):
-    """Online classification with OpenAI info for skin conditions"""
+    """
+    🆕 Online classification with BOTH scientific and popular names
+    """
     try:
         print(f"📥 Received file: {file.filename}, type: {file.content_type}")
         
+        # Read the uploaded file
         contents = await file.read()
         print(f"📦 File size: {len(contents)} bytes")
 
         if len(contents) == 0:
             raise HTTPException(400, "Empty file received")
 
+        # Verify it's a valid image
         try:
             img = Image.open(io.BytesIO(contents))
             print(f"✅ Valid image: {img.format} {img.size}")
@@ -181,6 +201,7 @@ async def classify_online(file: UploadFile = File(...)):
         result = response.json()
         print(f"📊 Ailabtools response: {json.dumps(result, indent=2)}")
 
+        # Check for API errors
         error_code = result.get("error_code", 0)
         if error_code != 0:
             error_msg = result.get("error_msg", "Unknown error")
@@ -193,6 +214,7 @@ async def classify_online(file: UploadFile = File(...)):
                 "error_message": error_msg
             })
 
+        # Extract results
         data = result.get("data", {})
         results = data.get("results_english", {})
         
@@ -206,32 +228,39 @@ async def classify_online(file: UploadFile = File(...)):
 
         print(f"✅ Classification results: {results}")
 
+        # Get best prediction (this might be scientific name)
         best_label = max(results.items(), key=lambda x: x[1])
-        label = best_label[0].replace("_", " ").title()
+        scientific_name = best_label[0].replace("_", " ").title()
         confidence = float(best_label[1])
 
-        print(f"🏆 Best: {label} = {confidence:.2%}")
+        print(f"🏆 Best: {scientific_name} = {confidence:.2%}")
 
-        normalized = normalize_label(label)
+        # Normalize to check if it's healthy or not skin
+        normalized = normalize_label(scientific_name)
 
+        # 🆕 If it's a SKIN CONDITION, get POPULAR NAME + info from OpenAI
         if normalized not in ["healthy", "not_skin"]:
-            print(f"🔍 Detected skin condition: {label}, getting OpenAI info...")
-            openai_info = get_skin_info_from_openai(label)
+            print(f"🔍 Detected skin condition: {scientific_name}, getting popular name + info...")
+            openai_info = get_skin_info_from_openai(scientific_name)
+            
+            # Create combined display label
+            popular_name = openai_info["alsoKnownAs"]
+            combined_label = f"{scientific_name} - also known as {popular_name}"
             
             return JSONResponse({
-                "label": label,
+                "label": combined_label,  # "Tinea Corporis - also known as Ringworm"
                 "confidence": confidence,
                 "all_results": results,
-                "alsoKnownAs": openai_info["alsoKnownAs"],
                 "explanation": openai_info["explanation"],
                 "causes": openai_info["causes"],
                 "dos": openai_info["dos"],
                 "donts": openai_info["donts"]
             })
         else:
+            # For healthy or not skin, no OpenAI info needed
             print(f"✅ Result is {normalized}, no OpenAI info needed")
             return JSONResponse({
-                "label": label,
+                "label": scientific_name,
                 "confidence": confidence,
                 "all_results": results
             })
@@ -254,11 +283,9 @@ async def classify_online(file: UploadFile = File(...)):
 # =========================
 @app.post("/classify/offline")
 async def classify_offline(file: UploadFile = File(...)):
-    """Offline analysis using local TFLite model"""
-    
-    if not interpreter:
-        raise HTTPException(503, "Offline mode not available on this server")
-    
+    """
+    Offline analysis using local TFLite model
+    """
     try:
         print(f"📥 Offline: {file.filename}")
         
@@ -266,21 +293,22 @@ async def classify_offline(file: UploadFile = File(...)):
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         input_data = preprocess_image(image)
 
-        input_details = interpreter.get_input_details()[0]
-        output_details = interpreter.get_output_details()[0]
-
+        # Run inference
         interpreter.set_tensor(input_details["index"], input_data)
         interpreter.invoke()
         output_data = interpreter.get_tensor(output_details["index"])[0]
 
+        # Get prediction
         max_idx = int(np.argmax(output_data))
         raw_label = labels[max_idx]
         confidence = float(output_data[max_idx])
 
         print(f"🔍 TFLite: {raw_label} ({confidence:.2%})")
 
+        # Normalize label
         normalized = normalize_label(raw_label)
 
+        # Handle "not skin"
         if normalized == "not_skin":
             return JSONResponse({
                 "label": "Not Skin",
@@ -288,6 +316,7 @@ async def classify_offline(file: UploadFile = File(...)):
                 "error": "not_skin"
             })
 
+        # Handle low confidence
         if is_low_confidence(confidence, 0.35):
             return JSONResponse({
                 "label": "Not Skin",
@@ -295,12 +324,14 @@ async def classify_offline(file: UploadFile = File(...)):
                 "error": "low_confidence"
             })
 
+        # Handle healthy
         if normalized == "healthy":
             return JSONResponse({
                 "label": "Healthy Skin",
                 "confidence": confidence
             })
 
+        # Normal result
         return JSONResponse({
             "label": raw_label,
             "confidence": confidence
@@ -328,40 +359,98 @@ async def classify_unified(
         return await classify_offline(file)
 
 # =========================
-# AI CHAT
+# AI CHAT - 🆕 WITH CONVERSATION HISTORY
 # =========================
 class ChatRequest(BaseModel):
     message: str
+    history: list = []  # Array of {role: "user/assistant", content: "..."}
 
 @app.post("/chat")
 def chat(req: ChatRequest):
     try:
         print(f"💬 Chat: {req.message[:50]}...")
+        print(f"📚 History length: {len(req.history)} messages")
+        
+        # Build messages array with history
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are DermAware's friendly dermatology assistant.\n\n"
+                    
+                    "YOUR EXPERTISE:\n"
+                    "- Skin health, skincare, and dermatology\n"
+                    "- Skin conditions, symptoms, and general care\n"
+                    "- Sun protection, moisturizing, and basic skincare routines\n"
+                    "- When to see a doctor for skin issues\n"
+                    "- General skin anatomy and function\n\n"
+                    
+                    "CONVERSATION GUIDELINES:\n"
+                    "- ALLOW natural conversation flow (greetings, thanks, acknowledgments, follow-ups)\n"
+                    "- Respond naturally to casual responses like 'okay', 'thanks', 'I see', 'ahhh'\n"
+                    "- Be friendly and conversational when discussing skin topics\n"
+                    "- Remember conversation context - if discussing a topic, stay engaged\n"
+                    "- Accept follow-up questions about topics already being discussed\n\n"
+                    
+                    "TOPIC RESTRICTIONS (only enforce for NEW topic requests):\n"
+                    "- REFUSE questions about: politics, sports, cooking, math, coding, general knowledge\n"
+                    "- REFUSE medical advice for non-skin conditions\n"
+                    "- For off-topic questions, say: \"I'm DermAware's skin health assistant and can only help "
+                    "with questions about skin, skincare, and dermatology. Please ask me about skin-related topics!\"\n\n"
+                    
+                    "EXAMPLES OF GOOD RESPONSES:\n"
+                    "User: 'What is acne?'\n"
+                    "You: [Explain acne in simple terms]\n\n"
+                    
+                    "User: 'Ahh okay, I see'\n"
+                    "You: 'Glad I could help! Feel free to ask if you have more questions about your skin.' ✅\n"
+                    "NOT: 'I can only help with skin topics' ❌\n\n"
+                    
+                    "User: 'Thanks!'\n"
+                    "You: 'You're welcome! Let me know if you need anything else about skincare.' ✅\n"
+                    "NOT: 'I can only help with skin topics' ❌\n\n"
+                    
+                    "User: 'How do I treat it?'\n"
+                    "You: [Give advice based on previous topic being discussed] ✅\n"
+                    "NOT: 'I can only help with skin topics' ❌\n\n"
+                    
+                    "User: 'Who won the election?'\n"
+                    "You: 'I'm DermAware's skin health assistant...' ✅\n\n"
+                    
+                    "MEDICAL DISCLAIMERS:\n"
+                    "- Never diagnose - only provide general information\n"
+                    "- Always recommend consulting healthcare professionals for serious concerns\n"
+                    "- Keep responses helpful but appropriately cautious"
+                )
+            }
+        ]
+        
+        # Add conversation history
+        for msg in req.history:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+        
+        # Add current message
+        messages.append({"role": "user", "content": req.message})
         
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a dermatology assistant for a mobile app. "
-                        "Provide general skincare advice. "
-                        "Do NOT diagnose. "
-                        "Always recommend consulting healthcare professionals."
-                    )
-                },
-                {"role": "user", "content": req.message}
-            ]
+            model="llama-3.3-70b-versatile",
+            messages=messages
         )
 
-        return {"reply": response.choices[0].message.content}
+        reply = response.choices[0].message.content
+        print(f"✅ Reply: {reply[:100]}...")
+
+        return {"reply": reply}
 
     except Exception as e:
         print(f"❌ Chat error: {e}")
         raise HTTPException(500, f"Chat failed: {str(e)}")
 
 # =========================
-# AI EXPLANATION
+# AI EXPLANATION (kept for backward compatibility)
 # =========================
 class ExplainRequest(BaseModel):
     label: str
@@ -373,6 +462,7 @@ def explain_result(req: ExplainRequest):
         
         condition = req.label.lower().strip()
         
+        # Not skin
         if "not skin" in condition:
             return {
                 "explanation": "The image doesn't appear to contain skin. Please take a clear photo of skin.",
@@ -391,6 +481,7 @@ def explain_result(req: ExplainRequest):
                 ]
             }
         
+        # Healthy skin
         if "healthy" in condition:
             return {
                 "explanation": "Your skin appears healthy! Continue good skincare habits.",
@@ -411,22 +502,23 @@ def explain_result(req: ExplainRequest):
                 ]
             }
         
+        # Get AI explanation for conditions (with popular name)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a dermatology assistant. "
+                        "You are a dermatology assistant. Use SIMPLE, EVERYDAY language.\n"
                         "Provide info in JSON format:\n"
-                        "- explanation: 2-3 sentences with disclaimer to see doctor\n"
-                        "- causes: 3-5 common causes\n"
-                        "- dos: 3-5 care recommendations\n"
-                        "- donts: 3-5 things to avoid\n"
-                        "Return ONLY valid JSON."
+                        "- explanation: 2-3 sentences in simple English with reminder to see doctor\n"
+                        "- causes: 3-5 common causes in everyday language\n"
+                        "- dos: 3-5 care recommendations in simple, actionable steps\n"
+                        "- donts: 3-5 things to avoid in simple language\n"
+                        "Return ONLY valid JSON. Use language a regular person would understand."
                     )
                 },
-                {"role": "user", "content": f"Explain: {req.label}"}
+                {"role": "user", "content": f"Explain in simple terms: {req.label}"}
             ],
             response_format={"type": "json_object"}
         )
@@ -461,19 +553,19 @@ def explain_result(req: ExplainRequest):
 def health():
     return {
         "status": "ok",
-        "service": "DermAware Backend",
-        "version": "2.0",
-        "environment": "production" if os.getenv("RAILWAY_ENVIRONMENT") else "development",
+        "service": "DermAware Backend v2.2",
+        "features": ["Scientific + Popular Names", "Conversational Chat with History"],
         "ailabtools": "✅" if AILABTOOLS_API_KEY else "❌",
-        "openai": "✅" if os.getenv("OPENAI_API_KEY") else "❌",
-        "tflite": "✅" if interpreter else "❌ (cloud mode only)",
+        "groq": "✅" if os.getenv("GROQ_API_KEY") else "❌",
+        "tflite": "✅",
         "endpoints": {
             "health": "GET /",
             "online": "POST /classify/online",
-            "offline": "POST /classify/offline (requires TFLite)",
+            "offline": "POST /classify/offline",
             "unified": "POST /classify",
-            "chat": "POST /chat",
-            "explain": "POST /explain_result"
+            "chat": "POST /chat (with conversation history)",
+            "explain": "POST /explain_result",
+            "ui": "GET /ui"
         }
     }
 
@@ -486,21 +578,7 @@ def ui():
         with open(os.path.join("static", "index.html"), "r", encoding="utf-8") as f:
             return f.read()
     except Exception:
-        return """
-        <html>
-            <head><title>DermAware Backend</title></head>
-            <body style="font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px;">
-                <h1>🔬 DermAware Backend</h1>
-                <p>Backend is running successfully!</p>
-                <h2>API Endpoints:</h2>
-                <ul>
-                    <li><code>GET /</code> - Health check</li>
-                    <li><code>POST /classify/online</code> - Online classification</li>
-                    <li><code>POST /chat</code> - AI chat</li>
-                </ul>
-            </body>
-        </html>
-        """
+        return "<h1>UI not available</h1><p>Create static/index.html</p>"
 
 # =========================
 # DEBUG
@@ -509,10 +587,9 @@ def ui():
 def debug():
     return {
         "ailabtools_key": "✅ Set" if AILABTOOLS_API_KEY else "❌ Missing",
-        "openai_key": "✅ Set" if os.getenv("OPENAI_API_KEY") else "❌ Missing",
-        "tflite_available": bool(interpreter),
-        "labels_count": len(labels) if labels else 0,
-        "environment": dict(os.environ) if os.getenv("DEBUG") == "true" else "hidden"
+        "groq_key": "✅ Set" if os.getenv("GROQ_API_KEY") else "❌ Missing",
+        "labels_count": len(labels),
+        "sample_labels": labels[:5]
     }
 
 # =========================
@@ -522,27 +599,24 @@ def debug():
 async def test():
     """Test that backend is working"""
     return {
-        "message": "Backend is running!",
-        "timestamp": "2025-01-07",
+        "message": "Backend v2.2 is running!",
+        "timestamp": "2025-01-17",
         "ailabtools_configured": bool(AILABTOOLS_API_KEY),
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "features": ["scientific_and_popular_names", "conversational_chat_with_history"],
         "ready": True
     }
 
 # =========================
-# RUN (Updated for Railway)
+# RUN
 # =========================
 if __name__ == "__main__":
     import uvicorn
-    
-    # Get port from environment (Railway sets this automatically)
-    port = int(os.getenv("PORT", 8000))
-    
-    print("🚀 DermAware Backend Starting...")
-    print(f"🌐 Environment: {'Railway' if os.getenv('RAILWAY_ENVIRONMENT') else 'Local'}")
-    print(f"📍 Port: {port}")
+    local_ip = get_local_ip()
+    print("🚀 DermAware Backend v2.2 Starting...")
+    print(f"📍 Local Network: http://{local_ip}:8000")
+    print(f"📍 Localhost:    http://127.0.0.1:8000")
     print(f"🌐 Ailabtools: {'✅' if AILABTOOLS_API_KEY else '❌'}")
-    print(f"🤖 OpenAI: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
-    print(f"📱 TFLite: {'✅' if interpreter else '❌ (cloud mode only)'}")
-    
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"🤖 Groq: {'✅' if os.getenv('GROQ_API_KEY') else '❌'}")
+    print(f"📱 TFLite: ✅")
+    print(f"✨ Features: Scientific + Popular Names ✅ | Conversational Chat ✅")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,7 +1,33 @@
-acne
-eczema
-dermatitis
-fungal
-psoriasis
+ Acne
+ Sun spots or sun-induced skin spots/scaly patches
+ Pattern baldness
+ Blistering skin disease
+ hyperpigmentation spots
+ Corn
+ harmless hard skin bump.
+ Eczema
+ Severe skin infection 
+ Hypersensitivity skin reaction
+ razor bumps or infected hair follicles
+ Infected hair follicle
+ Birthmark
+ Blisters/sores
+ Cold sores
+ Purpura Rash or Purple/Red Spots
+ Keloid
+ Chicken skin
+ Skin inflammation / rash
+ Lupus
+ Molluscum
+ Mole
+ Nail infection
+ Light patches/pale spots
+ Skin rash
+ Chronic itchy skin bumps
+ Psoriasis
+ Facial redness/flushing
+ Skin cyst
+ Hairless patch
+ Oily skin rash/flaky skin
 healthy
 not skin
